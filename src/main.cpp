@@ -7,7 +7,7 @@
 #include "camera_pins.h"
 
 const char* ssid = "SUPERONLINE_Wi-Fi_A662";
-const char* password = "FReSBNCQy4";
+const char* password = "FIX THIS";
 
 // Multipart MJPEG framing: the browser keeps one connection open and we
 // push a new JPEG after every boundary marker.
