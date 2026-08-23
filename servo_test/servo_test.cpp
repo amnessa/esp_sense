@@ -215,6 +215,7 @@ static void help() {
     "  f              full-speed step low->high, timed (true max speed)\n"
     "  j              jitter test: hold still 5s, watch for hunting/buzz\n"
     "  x              PIN SELF-TEST: is this GPIO driving at all? (multimeter)\n"
+    "  m              METER TEST: measure real pulse width as DC volts\n"
     "  d | a          detach / attach selected\n"
     "  z              PANIC: detach both immediately\n"
     "  r              report state\n"
@@ -345,6 +346,43 @@ static void pinSelfTest() {
   servoDetach(*sel);
 }
 
+// A multimeter on DC volts averages the pulse train, which means the reading is
+// a direct measurement of pulse width: avg = 3.3V * width / 20000us. So each
+// setpoint has its own predictable voltage, and the meter becomes a crude
+// oscilloscope. If these readings track, the ESP32 side is proven correct and
+// the fault is downstream, in the servo or its connector.
+static void meterTest() {
+  servoAttach(*sel);
+  static const uint16_t PTS[] = {500, 1000, 1500, 2000, 2500};
+
+  Serial.printf("\n[%s] pulse-width check on GPIO%d. DC volts, black on GND, red on\n"
+                "the signal wire at the servo plug. 6s per step:\n\n", sel->name, sel->pin);
+
+  for (uint8_t i = 0; i < sizeof(PTS) / sizeof(PTS[0]); i++) {
+    // Straight to the pin -- the ramp would smear the setpoint across the hold.
+    sel->target = PTS[i];
+    writeUs(*sel, PTS[i]);
+    delay(50);
+    Serial.printf("  %4uus  duty reg %5u/%5lu  -> expect %.2fV\n",
+                  PTS[i], (unsigned)ledcRead(sel->ch),
+                  (unsigned long)(1UL << DUTY_BITS),
+                  3.3f * PTS[i] / (float)PERIOD_US);
+    delay(6000);
+  }
+  writeUs(*sel, US_MID);
+  sel->target = US_MID;
+
+  Serial.println(F(
+    "\nReading it:\n"
+    "  voltages track (0.08 / 0.17 / 0.25 / 0.33 / 0.41V)\n"
+    "      -> the pulse train is correct and the ESP32 has done its job. The\n"
+    "         fault is the servo end. See the connector note below.\n"
+    "  stuck near 1.65V at every step\n"
+    "      -> the duty register really is jammed at 50%; that is a firmware bug\n"
+    "         and the reg numbers above will say so too.\n"
+    "  all ~0V -> the pin stopped driving between the self-test and now.\n"));
+}
+
 static void jitterTest() {
   servoAttach(*sel);
   Serial.printf("[%s] holding %.0fus for 5s -- listen. Continuous buzzing means\n"
@@ -443,6 +481,7 @@ static void handleLine(char* line) {
     case 'f': fullSpeedStep(); break;
     case 'j': jitterTest(); break;
     case 'x': pinSelfTest(); break;
+    case 'm': meterTest(); break;
     case 'd': servoDetach(*sel); break;
     case 'a': servoAttach(*sel); break;
     case 'z': servoDetach(pan); servoDetach(tilt); Serial.println(F("PANIC: both limp")); break;
