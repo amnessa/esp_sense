@@ -4,12 +4,13 @@
 #include "esp_http_server.h"
 
 #include "detector.h"
+#include "tracker.h"
 
 #define CAMERA_MODEL_XIAO_ESP32S3
 #include "camera_pins.h"
 
-const char* ssid = "SUPERONLINE_Wi-Fi_A662";
-const char* password = "FReSBNCQy4";
+const char* ssid = "ROMER_MESH";
+const char* password = "K0van1231";
 
 // Multipart MJPEG framing: the browser keeps one connection open and we
 // push a new JPEG after every boundary marker.
@@ -221,15 +222,29 @@ void setup() {
     Serial.println("Detector failed to start; continuing as a plain stream.");
   }
 
+  // After the camera: esp_camera_init() claims LEDC timer 0 / channel 0 for
+  // XCLK, and attaching first would let it reconfigure the timer under us.
+  if (!tracker_start()) {
+    Serial.println("Tracker failed to attach; the head will not move.");
+  }
+
   Serial.print("Connecting to WiFi network: ");
   Serial.println(ssid);
 
   WiFi.begin(ssid, password);
   WiFi.setSleep(false);  // modem sleep adds latency spikes to the stream
 
-  while (WiFi.status() != WL_CONNECTED) {
+  // Bounded: tracking is the primary job and it does not need the network.
+  // An unbounded wait here would strand the servo loop on a bad AP.
+  uint32_t began = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - began < 15000) {
     delay(500);
     Serial.print(".");
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("\nWiFi failed; tracking anyway, no web UI.");
+    return;
   }
 
   Serial.println("\nConnected to WiFi network!");
@@ -246,21 +261,39 @@ void setup() {
   Serial.println("/capture");
 }
 
-// Stand-in for the servo loop: prints the same numbers a controller would read,
-// so the tracker can be tuned before any hardware is attached.
-void loop() {
-  DetectionState d;
-  detector_get(&d);
+// The servo loop owns loop(). tracker_tick() is non-blocking and must run far
+// faster than the detector so the ramp stays smooth between inferences; the
+// status line is throttled to 1Hz separately, because a Serial.printf per tick
+// would itself become the thing that stalls the ramp.
+static const uint32_t TICK_MS   = 10;
+static const uint32_t REPORT_MS = 1000;
 
-  // seq and infer_ms print unconditionally: a stalled detector looks identical
-  // to one that simply sees no faces unless the frame counter is visible.
-  if (d.valid) {
-    Serial.printf("err %+.3f %+.3f  score %.2f  %lu ms  #%lu\n", d.err_x, d.err_y,
-                  d.score, (unsigned long)d.infer_ms, (unsigned long)d.seq);
-  } else {
-    Serial.printf("-- no face  #%lu  %lu ms/frame\n", (unsigned long)d.seq,
-                  (unsigned long)d.infer_ms);
+void loop() {
+  static uint32_t lastReport = 0;
+
+  tracker_tick();
+
+  if (millis() - lastReport >= REPORT_MS) {
+    lastReport = millis();
+
+    DetectionState d;
+    detector_get(&d);
+
+    float pan_us, tilt_us;
+    tracker_pulses(&pan_us, &tilt_us);
+
+    // seq and infer_ms print unconditionally: a stalled detector looks
+    // identical to one that simply sees no faces unless the counter is visible.
+    if (d.valid) {
+      Serial.printf("err %+.3f %+.3f  score %.2f  pan %.0f tilt %.0fus  %lu ms  #%lu\n",
+                    d.err_x, d.err_y, d.score, pan_us, tilt_us,
+                    (unsigned long)d.infer_ms, (unsigned long)d.seq);
+    } else {
+      Serial.printf("-- no face  pan %.0f tilt %.0fus  #%lu  %lu ms/frame\n",
+                    pan_us, tilt_us, (unsigned long)d.seq,
+                    (unsigned long)d.infer_ms);
+    }
   }
 
-  delay(1000);
+  delay(TICK_MS);
 }
